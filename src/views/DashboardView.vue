@@ -280,6 +280,7 @@ export default {
       
       await this.listarCamaras()
       await this.cargarPersonasRegistradas()
+      await this.obtenerHistorialDesconocidos()
       this.actualizarFecha()
       this.iniciarCapturaPeriodica()
     } else {
@@ -501,16 +502,11 @@ export default {
         const verifyingFace = faces.find(face => face.reason === 'verifying')
         this.estadoVerificacion = verifyingFace ? `${verifyingFace.verify_count || 0}/${verifyingFace.verify_required || 2}` : null
 
-        faces.forEach(face => {
-          if (face.reason === 'unknown_face' && face.unknown_image_url) {
-            const imageUrl = new URL(face.unknown_image_url, window.location.origin).href
-            this.agregarAlerta({
-              imageUrl,
-              title: face.name || 'Rostro desconocido'
-            })
-          }
-        })
-        
+        const unknownFace = faces.find(face => face.reason === 'unknown_face' && face.unknown_image_url)
+        if (unknownFace) {
+          await this.obtenerHistorialDesconocidos()
+        }
+
         this.calcularFPS()
         
       } catch (error) {
@@ -782,6 +778,36 @@ export default {
       }
     },
     
+    async obtenerHistorialDesconocidos(limit = 50) {
+      if (!this.currentUserId) return
+
+      try {
+        const response = await fetch(`${this.apiUrl}/api/unknown-faces-history/${this.currentUserId}?limit=${limit}`)
+        const data = await response.json()
+
+        this.historial = (data.unknown_faces || []).map(item => {
+          const fecha = new Date(item.timestamp)
+          const imageUrl = item.face_image_path?.startsWith('http')
+            ? item.face_image_path
+            : `${this.apiUrl}${item.face_image_path}`
+
+          return {
+            id: item.id,
+            imageUrl,
+            title: item.confidence !== null && item.confidence !== undefined
+              ? `Rostro desconocido · ${Number(item.confidence).toFixed(3)}`
+              : 'Rostro desconocido',
+            fecha: fecha.toLocaleDateString(),
+            hora: fecha.toLocaleTimeString(),
+            revisado: item.is_reviewed
+          }
+        })
+      } catch (error) {
+        console.error('Error cargando historial:', error)
+        this.historial = []
+      }
+    },
+
     async editarUsuario(user) {
       const nuevoNombre = prompt('Ingrese el nuevo nombre:', user.nombre)
       if (nuevoNombre && nuevoNombre !== user.nombre) {

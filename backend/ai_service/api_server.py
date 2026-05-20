@@ -364,8 +364,8 @@ def is_moving(session: Dict, track_id: int, current_position: Tuple[int, int]) -
 def save_unknown_face(user_id: str, session_id: str, track_id: int, face_img: np.ndarray) -> str:
     unknown_dir = USERS_DATA_DIR / user_id / "unknown_faces"
     unknown_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = int(time.time() * 1000)
-    filename = f"unknown_{session_id}_{track_id}_{timestamp}.jpg"
+    timestamp = datetime.utcnow().strftime("%d_%m_%y_%H_%M_%S")
+    filename = f"unknown_{timestamp}.jpg"
     file_path = unknown_dir / filename
 
     success, buf = cv2.imencode('.jpg', face_img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
@@ -374,6 +374,21 @@ def save_unknown_face(user_id: str, session_id: str, track_id: int, face_img: np
         file_path.write_bytes(buf.tobytes())
         public_url = build_public_image_url(file_path)
         save_security_event(user_id, "unknown_face", None, None, public_url)
+        
+        # Guardar en tabla de historial de caras desconocidas
+        try:
+            supabase.table("unknown_faces_history").insert([{
+                "user_id": user_id,
+                "face_image_path": public_url,
+                "confidence": None,
+                "timestamp": datetime.utcnow().isoformat(),
+                "is_reviewed": False
+            }]).execute()
+            print(f"✅ Cara desconocida guardada en historial: {filename}")
+        except Exception as e:
+            import traceback
+            print(f"⚠️ Error guardando en unknown_faces_history:")
+            traceback.print_exc()
 
     return public_url or f"/unknown_faces/{user_id}/unknown_faces/{filename}"
 
@@ -858,6 +873,44 @@ async def get_known_faces(user_id: str):
         "faces": usuarios,
         "total": len(usuarios)
     }
+
+@app.get("/api/unknown-faces-history/{user_id}")
+async def get_unknown_faces_history(user_id: str, limit: int = 50):
+    try:
+        response = supabase.table("unknown_faces_history").select(
+            "id,face_image_path,confidence,timestamp,is_reviewed"
+        ).eq("user_id", user_id).order("timestamp", desc=True).limit(limit).execute()
+        
+        if response and response.data:
+            return {
+                "user_id": user_id,
+                "unknown_faces": response.data,
+                "total": len(response.data)
+            }
+        else:
+            return {
+                "user_id": user_id,
+                "unknown_faces": [],
+                "total": 0
+            }
+    except Exception as e:
+        import traceback
+        print(f"❌ Error recuperando historial de caras desconocidas:")
+        traceback.print_exc()
+        raise HTTPException(500, "Error recuperando historial")
+
+@app.put("/api/mark-reviewed/{history_id}")
+async def mark_as_reviewed(history_id: int):
+    try:
+        supabase.table("unknown_faces_history").update(
+            {"is_reviewed": True}
+        ).eq("id", history_id).execute()
+        return {"success": True, "message": "Marcado como revisado"}
+    except Exception as e:
+        import traceback
+        print(f"❌ Error marcando como revisado:")
+        traceback.print_exc()
+        raise HTTPException(500, "Error marcando como revisado")
 
 @app.post("/api/register/{user_id}")
 async def register_person(
