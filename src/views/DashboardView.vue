@@ -261,9 +261,9 @@ export default {
       registroActivo: false,
       registroCompletado: false,
       nombreRegistro: '',
-      tiempoRestante: 30,
+      tiempoRestante: 20,
       fotosGuardadas: 0,
-      maxFotos: 70,
+      maxFotos: 100,
       registroInterval: null,
       captureInterval: null,
       
@@ -672,9 +672,9 @@ export default {
       this.registroCompletado = false
       this.fotosGuardadas = 0
       this.fotosCapturadasLista = []
-      this.tiempoRestante = 30
+      this.tiempoRestante = 20
 
-      console.log("🚀 Iniciando captura por 30 segundos")
+      console.log("🚀 Iniciando captura por 20 segundos")
       
       // Capturar cada 500ms (2 fps) para evitar fotos repetidas
       this.captureInterval = setInterval(async () => {

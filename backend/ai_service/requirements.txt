@@ -15,6 +15,7 @@ ultralytics==8.3.187
 
 torch==2.7.1
 torchvision==0.22.1
+paramiko==3.1.0
 
 pydantic==2.11.7
 scipy==1.13.1

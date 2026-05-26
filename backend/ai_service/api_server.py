@@ -6,6 +6,8 @@ import asyncio
 import threading
 import queue
 import time
+import subprocess
+import sys
 import numpy as np
 from pathlib import Path
 from datetime import datetime
@@ -60,26 +62,26 @@ USERS_DATA_DIR.mkdir(exist_ok=True)
 # PARÁMETROS OPTIMIZADOS PARA FACENET512
 # =========================================
 
-THRESHOLD = 0.88
-MIN_SCORE = 0.84
-RATIO_THRESHOLD = 0.05
+THRESHOLD = 0.85 
+MIN_SCORE = 0.82
+RATIO_THRESHOLD = 0.05 
 
 VERIFY_REQUIRED = 2
-VERIFY_WINDOW = 4.0
+VERIFY_WINDOW = 4.0 
 
-SHARPNESS_FILTER = 28
-MIN_FACE_SIZE = 80
+SHARPNESS_FILTER = 28 # 
+MIN_FACE_SIZE = 80 
 MOTION_SPEED_THRESHOLD = 12
 
-MAX_EMBEDDINGS = 30
-MAX_BUFFER = 3
-EMBEDDING_SKIP_FRAMES = 3
+MAX_EMBEDDINGS = 30 # 
+MAX_BUFFER = 3 # 
+EMBEDDING_SKIP_FRAMES = 3 # 
 
-FACE_SIZE = 160
-DETECTION_SIZE = 636
+FACE_SIZE = 96 # 
+DETECTION_SIZE = 640 
 
 # Tracking
-LOST_TRACK_TOLERANCE = 8.0
+LOST_TRACK_TOLERANCE = 8.0 # 
 
 # =========================================
 # CONFIGURACIÓN FASTAPI
@@ -111,11 +113,203 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 SUPABASE_STORAGE_BUCKET = os.environ.get("SUPABASE_STORAGE_BUCKET", "mira-images")
 
+# =========================================
+# CONFIGURACIÓN POSTGRESQL UBUNTU SERVER
+# =========================================
+import psycopg2
+from psycopg2.extras import Json
+
+# Configuración de conexión a Ubuntu Server
+UBUNTU_DB_CONFIG = {
+    "host": "192.168.0.159",
+    "port": 5432,
+    "dbname": "mira",
+    "user": "mira_user",
+    "password": "Mira2024Secure"
+}
+
+# =========================================
+# ALMACENAMIENTO DE IMÁGENES EN UBUNTU (CON CLAVE SSH)
+# =========================================
+UBUNTU_IMAGE_SHARE_PATH = os.environ.get("UBUNTU_IMAGE_SHARE_PATH")
+UBUNTU_SFTP_HOST = os.environ.get("UBUNTU_SFTP_HOST", "192.168.0.159")
+UBUNTU_SFTP_PORT = int(os.environ.get("UBUNTU_SFTP_PORT", 22))
+UBUNTU_SFTP_USER = os.environ.get("UBUNTU_SFTP_USER", "lck")
+UBUNTU_SFTP_KEY_PATH = os.environ.get("UBUNTU_SFTP_KEY_PATH", os.path.expanduser("~/.ssh/id_rsa"))
+UBUNTU_IMAGE_BASE_DIR = os.environ.get("UBUNTU_IMAGE_BASE_DIR", "/home/lck/mira_images")
+
+PARAMIKO_AVAILABLE = False
+try:
+    import paramiko
+    PARAMIKO_AVAILABLE = True
+except ImportError:
+    PARAMIKO_AVAILABLE = False
+
+# =========================================
+# ESTADO DEL SERVIDOR UBUNTU (verificado una sola vez)
+# =========================================
+UBUNTU_SERVER_AVAILABLE = None
+
+def check_ubuntu_server():
+    """Verificar si el servidor Ubuntu está disponible (solo una vez al inicio)"""
+    global UBUNTU_SERVER_AVAILABLE
+    
+    if UBUNTU_SERVER_AVAILABLE is not None:
+        return UBUNTU_SERVER_AVAILABLE
+    
+    print("🔍 Verificando conexión con servidor Ubuntu...")
+    
+    # Verificar PostgreSQL
+    pg_ok = False
+    try:
+        conn = psycopg2.connect(**UBUNTU_DB_CONFIG, connect_timeout=2)
+        conn.close()
+        pg_ok = True
+    except:
+        pass
+    
+    # Verificar SSH/SFTP
+    ssh_ok = False
+    if PARAMIKO_AVAILABLE and os.path.exists(UBUNTU_SFTP_KEY_PATH):
+        try:
+            transport = paramiko.Transport((UBUNTU_SFTP_HOST, UBUNTU_SFTP_PORT))
+            transport.connect_timeout = 2
+            key = paramiko.RSAKey.from_private_key_file(UBUNTU_SFTP_KEY_PATH)
+            transport.connect(username=UBUNTU_SFTP_USER, pkey=key)
+            transport.close()
+            ssh_ok = True
+        except:
+            pass
+    
+    UBUNTU_SERVER_AVAILABLE = (pg_ok or ssh_ok)
+    
+    if UBUNTU_SERVER_AVAILABLE:
+        print("✅ Servidor Ubuntu disponible - Backups ACTIVADOS")
+    else:
+        print("⚠️ Servidor Ubuntu NO disponible - Backups DESACTIVADOS (modo offline)")
+    
+    return UBUNTU_SERVER_AVAILABLE
+
+def get_ubuntu_connection():
+    """Obtener conexión a PostgreSQL (solo si servidor disponible)"""
+    if not UBUNTU_SERVER_AVAILABLE:
+        return None
+    try:
+        conn = psycopg2.connect(**UBUNTU_DB_CONFIG, connect_timeout=2)
+        conn.autocommit = True
+        return conn
+    except Exception:
+        return None
+
+def replicate_to_ubuntu(table: str, data: dict):
+    """Replicar datos (solo si servidor disponible)"""
+    if not UBUNTU_SERVER_AVAILABLE:
+        return False
+    
+    conn = get_ubuntu_connection()
+    if not conn:
+        return False
+    
+    try:
+        with conn.cursor() as cur:
+            columns = ', '.join(data.keys())
+            placeholders = ', '.join(['%s'] * len(data))
+            query = f"INSERT INTO {table} ({columns}) VALUES ({placeholders})"
+            cur.execute(query, list(data.values()))
+            return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+def update_ubuntu(table: str, data: dict, where_condition: str, where_params: tuple):
+    """Actualizar datos (solo si servidor disponible)"""
+    if not UBUNTU_SERVER_AVAILABLE:
+        return False
+    
+    conn = get_ubuntu_connection()
+    if not conn:
+        return False
+    
+    try:
+        with conn.cursor() as cur:
+            set_clause = ', '.join([f"{k} = %s" for k in data.keys()])
+            query = f"UPDATE {table} SET {set_clause} WHERE {where_condition}"
+            params = list(data.values()) + list(where_params)
+            cur.execute(query, params)
+            return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+def delete_ubuntu(table: str, where_condition: str, where_params: tuple):
+    """Eliminar datos (solo si servidor disponible)"""
+    if not UBUNTU_SERVER_AVAILABLE:
+        return False
+    
+    conn = get_ubuntu_connection()
+    if not conn:
+        return False
+    
+    try:
+        with conn.cursor() as cur:
+            query = f"DELETE FROM {table} WHERE {where_condition}"
+            cur.execute(query, where_params)
+            return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+def copy_image_to_ubuntu(local_path: Path, relative_path: str) -> bool:
+    """Copiar imagen (solo si servidor disponible)"""
+    if not UBUNTU_SERVER_AVAILABLE:
+        return False
+    
+    try:
+        if not PARAMIKO_AVAILABLE:
+            return False
+
+        remote_relative = relative_path.lstrip("/")
+        remote_path = f"{UBUNTU_IMAGE_BASE_DIR.rstrip('/')}/{remote_relative}"
+        remote_dir = os.path.dirname(remote_path)
+
+        transport = paramiko.Transport((UBUNTU_SFTP_HOST, UBUNTU_SFTP_PORT))
+        transport.connect_timeout = 2
+        
+        if os.path.exists(UBUNTU_SFTP_KEY_PATH):
+            key = paramiko.RSAKey.from_private_key_file(UBUNTU_SFTP_KEY_PATH)
+            transport.connect(username=UBUNTU_SFTP_USER, pkey=key)
+        else:
+            return False
+
+        sftp = paramiko.SFTPClient.from_transport(transport)
+        
+        # Crear directorio remoto si no existe
+        remote_dir = remote_dir.replace("\\", "/")
+        parts = [p for p in remote_dir.split("/") if p]
+        path = ""
+        for part in parts:
+            path = f"{path}/{part}" if path else f"/{part}"
+            try:
+                sftp.stat(path)
+            except:
+                try:
+                    sftp.mkdir(path)
+                except:
+                    pass
+        
+        sftp.put(str(local_path), remote_path)
+        sftp.close()
+        transport.close()
+        return True
+    except Exception:
+        return False
 
 def build_public_image_url(path: Path) -> str:
     relative_path = path.relative_to(USERS_DATA_DIR).as_posix()
     return f"/unknown_faces/{relative_path}"
-
 
 def save_security_event(
     user_id: str,
@@ -124,6 +318,14 @@ def save_security_event(
     confidence: Optional[float],
     image_path: str
 ):
+    event_type_mapping = {
+        "unknown_face": "unknown_face",
+        "known_face": "known_face",
+        "motion_detected": "motion_detected"
+    }
+    pg_event_type = event_type_mapping.get(event_type, "unknown_face")
+    
+    # Guardar en Supabase
     try:
         supabase.table("security_events").insert([{
             "user_id": user_id,
@@ -134,11 +336,23 @@ def save_security_event(
             "timestamp": datetime.utcnow().isoformat(),
             "is_viewed": False
         }]).execute()
+        print(f"✅ Evento guardado en Supabase")
     except Exception as e:
         import traceback
         print(f"❌ Error guardando evento de seguridad en Supabase:")
         traceback.print_exc()
-
+    
+    # Replicar en Ubuntu (solo si servidor disponible)
+    if UBUNTU_SERVER_AVAILABLE:
+        replicate_to_ubuntu("security_events", {
+            "user_id": user_id,
+            "event_type": pg_event_type,
+            "person_name": person_name,
+            "confidence": confidence,
+            "image_path": image_path,
+            "timestamp": datetime.utcnow(),
+            "is_viewed": False
+        })
 
 # =========================================
 # MODELO YOLO - YOLOv8m-face
@@ -166,8 +380,7 @@ class FaceRecognitionResult(BaseModel):
     verify_count: Optional[int] = None
     verify_required: Optional[int] = None
     unknown_image_url: Optional[str] = None
-    unknown_image_url: Optional[str] = None
-    unknown_image_url: Optional[str] = None
+
 class RecognitionResponse(BaseModel):
     recognized: bool
     name: Optional[str] = None
@@ -196,10 +409,6 @@ class SimpleFaceRecognizer:
         self.embedding_buffer: Dict[int, deque] = {}
         self.load_database()
 
-    # =========================================
-    # PREPROCESS
-    # =========================================
-
     def preprocess_face(self, face_img: np.ndarray) -> np.ndarray:
         face = cv2.resize(face_img, (FACE_SIZE, FACE_SIZE))
 
@@ -211,10 +420,6 @@ class SimpleFaceRecognizer:
         face = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
 
         return np.ascontiguousarray(face, dtype=np.uint8)
-
-    # =========================================
-    # EMBEDDING
-    # =========================================
 
     def get_embedding(self, face_img: np.ndarray) -> Optional[np.ndarray]:
         try:
@@ -304,10 +509,6 @@ class SimpleFaceRecognizer:
 
 # =========================================
 # FUNCIONES DE SESIÓN
-        return list(self.known_embeddings.keys())
-
-# =========================================
-# FUNCIONES DE SESIÓN
 # =========================================
 
 def get_or_create_session(session_id: str, user_id: str) -> Dict:
@@ -373,9 +574,12 @@ def save_unknown_face(user_id: str, session_id: str, track_id: int, face_img: np
     if success:
         file_path.write_bytes(buf.tobytes())
         public_url = build_public_image_url(file_path)
+        
+        # Backup a Ubuntu (solo si servidor disponible)
+        copy_image_to_ubuntu(file_path, file_path.relative_to(USERS_DATA_DIR).as_posix())
+        
         save_security_event(user_id, "unknown_face", None, None, public_url)
         
-        # Guardar en tabla de historial de caras desconocidas
         try:
             supabase.table("unknown_faces_history").insert([{
                 "user_id": user_id,
@@ -384,14 +588,23 @@ def save_unknown_face(user_id: str, session_id: str, track_id: int, face_img: np
                 "timestamp": datetime.utcnow().isoformat(),
                 "is_reviewed": False
             }]).execute()
-            print(f"✅ Cara desconocida guardada en historial: {filename}")
+            print(f"✅ Cara desconocida guardada en historial (Supabase): {filename}")
         except Exception as e:
             import traceback
-            print(f"⚠️ Error guardando en unknown_faces_history:")
+            print(f"⚠️ Error guardando en unknown_faces_history (Supabase):")
             traceback.print_exc()
+        
+        # Replicar en Ubuntu (solo si servidor disponible)
+        if UBUNTU_SERVER_AVAILABLE:
+            replicate_to_ubuntu("unknown_faces_history", {
+                "user_id": user_id,
+                "face_image_path": public_url,
+                "confidence": None,
+                "timestamp": datetime.utcnow(),
+                "is_reviewed": False
+            })
 
     return public_url or f"/unknown_faces/{user_id}/unknown_faces/{filename}"
-
 
 def match_face_in_session(
     session: Dict,
@@ -424,7 +637,6 @@ def match_face_in_session(
         return {"name": None, "recognized": False, "reason": "no_embedding"}
 
     if track_id in session["stable_id"]:
-        # If this track already has a stable confirmed identity, return it quickly.
         stable_name = session["stable_id"][track_id]
         stable_embeddings = recognizer.known_embeddings.get(stable_name, [])
         if stable_embeddings:
@@ -444,7 +656,6 @@ def match_face_in_session(
                 "reason": "stable_match"
             }
 
-    # For realtime webcam use a minimal buffer to reduce latency
     if track_id not in session["embedding_buffer"]:
         session["embedding_buffer"][track_id] = deque(maxlen=MAX_BUFFER)
     session["embedding_buffer"][track_id].append(embedding)
@@ -453,7 +664,6 @@ def match_face_in_session(
     if emb_stack.size == 0:
         return {"name": None, "recognized": False, "reason": "empty_buffer"}
 
-    # Use latest embedding (no averaging) for speed and responsiveness
     embedding = emb_stack[-1]
     norm = np.linalg.norm(embedding)
     if norm == 0:
@@ -475,8 +685,6 @@ def match_face_in_session(
         top_k = min(10, len(similarities))
         top_similarities = sorted(similarities)[-top_k:]
         avg_top = np.mean(top_similarities)
-        consistency = np.std(top_similarities) if len(top_similarities) > 1 else 0.0
-        stability_penalty = min(consistency * 0.08, 0.03)
         final_score = float((max_score * 0.65) + (avg_top * 0.35))
 
         scores.append({
@@ -497,11 +705,7 @@ def match_face_in_session(
     score_gap = best_score - second_score
 
     candidate = None
-    if (
-        best_score >= THRESHOLD and
-        best_score >= MIN_SCORE and
-        score_gap >= RATIO_THRESHOLD
-    ):
+    if (best_score >= THRESHOLD and best_score >= MIN_SCORE and score_gap >= RATIO_THRESHOLD):
         candidate = best_name
 
     if track_id not in session["verify_counter"]:
@@ -528,11 +732,7 @@ def match_face_in_session(
     if candidate is not None:
         if session["verified_identity"][track_id] == candidate:
             session["verify_counter"][track_id] += 1
-            print(
-                f"[✓] ID:{track_id} - {candidate}: "
-                f"{session['verify_counter'][track_id]}/{VERIFY_REQUIRED} "
-                f"(score={best_score:.3f})"
-            )
+            print(f"[✓] ID:{track_id} - {candidate}: {session['verify_counter'][track_id]}/{VERIFY_REQUIRED} (score={best_score:.3f})")
         else:
             session["verified_identity"][track_id] = candidate
             session["verify_start_time"][track_id] = current_time
@@ -547,10 +747,7 @@ def match_face_in_session(
     if session["verify_counter"][track_id] >= VERIFY_REQUIRED:
         session["stable_id"][track_id] = session["verified_identity"][track_id]
         session["verification_completed"][track_id] = True
-        print(
-            f"\n✅ [CONFIRMADO] ID:{track_id} = {session['stable_id'][track_id]} "
-            f"en {time_elapsed:.1f}s"
-        )
+        print(f"\n✅ [CONFIRMADO] ID:{track_id} = {session['stable_id'][track_id]} en {time_elapsed:.1f}s")
         return {
             "name": session['stable_id'][track_id],
             "recognized": True,
@@ -687,7 +884,6 @@ def detect_faces_with_tracking(image: np.ndarray) -> List[Dict]:
 # =========================================
 
 def detect_and_crop_faces(image: np.ndarray) -> List[np.ndarray]:
-    """Detecta y recorta rostros para registro"""
     detection_frame = cv2.resize(image, (640, 360))
     
     results = model(
@@ -905,6 +1101,12 @@ async def mark_as_reviewed(history_id: int):
         supabase.table("unknown_faces_history").update(
             {"is_reviewed": True}
         ).eq("id", history_id).execute()
+        
+        update_ubuntu("unknown_faces_history", 
+                     {"is_reviewed": True}, 
+                     "id = %s", 
+                     (history_id,))
+        
         return {"success": True, "message": "Marcado como revisado"}
     except Exception as e:
         import traceback
@@ -923,12 +1125,10 @@ async def register_person(
     print(f"📦 Fotos recibidas: {len(files)}")
     print(f"{'='*60}")
     
-    # Validar y crear usuario en Supabase si no existe
     try:
         user_check = supabase.table("users").select("id").eq("id", user_id).execute()
         if not user_check.data or len(user_check.data) == 0:
-            print(f"⚠️ Usuario no encontrado. Creando automáticamente: {user_id}")
-            # Crear usuario automáticamente para testing
+            print(f"⚠️ Usuario no encontrado en Supabase. Creando automáticamente: {user_id}")
             supabase.table("users").insert([{
                 "id": user_id,
                 "email": f"user_{user_id[:8]}@mira.local",
@@ -936,9 +1136,32 @@ async def register_person(
                 "password_hash": "test_hash"
             }]).execute()
             print(f"✅ Usuario creado en Supabase")
+        
+        # Crear usuario en Ubuntu solo si servidor disponible
+        if UBUNTU_SERVER_AVAILABLE:
+            ubuntu_conn = get_ubuntu_connection()
+            if ubuntu_conn:
+                try:
+                    with ubuntu_conn.cursor() as cur:
+                        cur.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+                        user_exists = cur.fetchone()
+                        
+                        if not user_exists:
+                            cur.execute("""
+                                INSERT INTO users (id, email, nombre, password_hash, created_at)
+                                VALUES (%s, %s, %s, %s, %s)
+                            """, (user_id, f"user_{user_id[:8]}@mira.local", "Usuario MIRA", "test_hash", datetime.utcnow()))
+                            print(f"✅ Usuario creado en Ubuntu PostgreSQL")
+                        else:
+                            print(f"✅ Usuario ya existe en Ubuntu PostgreSQL")
+                except Exception:
+                    pass
+                finally:
+                    ubuntu_conn.close()
+                    
     except Exception as e:
         import traceback
-        print(f"❌ Error verificando/creando usuario en Supabase:")
+        print(f"❌ Error verificando/creando usuario:")
         traceback.print_exc()
         raise HTTPException(500, "Error verificando autenticación del usuario")
     
@@ -1006,6 +1229,10 @@ async def register_person(
                 
                 filename = person_folder / f"{saved_count:04d}.jpg"
                 cv2.imwrite(str(filename), face_img)
+                
+                # Backup a Ubuntu (solo si servidor disponible)
+                copy_image_to_ubuntu(filename, filename.relative_to(USERS_DATA_DIR).as_posix())
+                
                 saved_count += 1
                 all_embeddings.append(embedding)
                 image_url = build_public_image_url(filename)
@@ -1039,15 +1266,26 @@ async def register_person(
     known_face_id = None
     try:
         supabase.table("known_faces").delete().eq("user_id", user_id).eq("name", folder_name).execute()
+        
+        delete_ubuntu("known_faces", "user_id = %s AND name = %s", (user_id, folder_name))
+        
         response = supabase.table("known_faces").insert([{
             "user_id": user_id,
             "name": folder_name,
             "notes": f"Nombre real: {name} | Fotos: {saved_count}",
             "created_at": datetime.utcnow().isoformat()
         }]).select("id").execute()
+        
         if response and response.data and len(response.data) > 0:
             known_face_id = response.data[0].get("id")
             print(f"✅ Registro en Supabase completado (ID: {known_face_id})")
+            
+            replicate_to_ubuntu("known_faces", {
+                "user_id": user_id,
+                "name": folder_name,
+                "notes": f"Nombre real: {name} | Fotos: {saved_count}",
+                "created_at": datetime.utcnow()
+            })
         else:
             print(f"⚠️ No se obtuvo ID del registro en Supabase")
     except Exception as e:
@@ -1062,6 +1300,23 @@ async def register_person(
         try:
             supabase.table("face_embeddings").insert(face_records).execute()
             print(f"✅ {len(face_records)} embeddings registrados en face_embeddings")
+            
+            if UBUNTU_SERVER_AVAILABLE:
+                success_count = 0
+                for record in face_records:
+                    result = replicate_to_ubuntu("face_embeddings", {
+                        "user_id": record["user_id"],
+                        "face_id": record["face_id"],
+                        "embedding_vector": Json(record["embedding_vector"]),
+                        "image_path": record["image_path"],
+                        "created_at": datetime.utcnow()
+                    })
+                    if result:
+                        success_count += 1
+                
+                if success_count > 0:
+                    print(f"✅ {success_count}/{len(face_records)} embeddings replicados en Ubuntu")
+            
         except Exception as e:
             import traceback
             print("❌ Error guardando embeddings en Supabase:")
@@ -1094,6 +1349,9 @@ async def delete_person(user_id: str, name: str):
         
         try:
             supabase.table("known_faces").delete().eq("user_id", user_id).eq("name", folder_name).execute()
+            
+            delete_ubuntu("known_faces", "user_id = %s AND name = %s", (user_id, folder_name))
+            
         except Exception as e:
             import traceback
             print(f"⚠️ Error eliminando de Supabase:")
@@ -1111,6 +1369,10 @@ if __name__ == "__main__":
     print("\n" + "="*70)
     print("🚀 MIRA API SERVER v4.1 - FACENET512 OPTIMIZADO")
     print("="*70)
+    
+    # Verificar servidor Ubuntu UNA SOLA VEZ al iniciar
+    check_ubuntu_server()
+    
     print("✨ CAMBIOS CRÍTICOS IMPLEMENTADOS:")
     print(f"   1. ✅ THRESHOLD: {THRESHOLD}")
     print(f"   2. ✅ MIN_SCORE: {MIN_SCORE}")
